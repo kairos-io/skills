@@ -1,0 +1,16 @@
+#!/bin/sh
+# Simulated failing kairos-agent for the install failure demo.
+# manual-install fails after a couple of steps; everything else (e.g. `logs`)
+# is delegated to the real agent so the debug bundle still gathers journald.
+if [ "$1" = "manual-install" ]; then
+  echo '{"event":"step","step":"partition"}'
+  sleep 1
+  echo '{"event":"step","step":"before-install"}'
+  echo "kairos-agent: starting before-install stage on /dev/vda" 1>&2
+  sleep 1
+  echo "ERROR: failed to fetch installation source: open /run/cos/active.img: no such file or directory" 1>&2
+  echo "ERROR: before-install stage aborted (exit status 1)" 1>&2
+  echo '{"event":"error","message":"before-install failed: cannot read installation source (simulated failure)"}'
+  exit 1
+fi
+exec /usr/sbin/kairos-agent "$@"

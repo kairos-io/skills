@@ -1,0 +1,6 @@
+ARG BASE=hadron-init
+FROM ${BASE}
+COPY kairos-installer /system/installer/installer
+COPY kairos-agent-main /usr/sbin/kairos-agent
+COPY fake-agent /opt/fake-agent
+RUN chmod 0755 /system/installer/installer /usr/sbin/kairos-agent /opt/fake-agent

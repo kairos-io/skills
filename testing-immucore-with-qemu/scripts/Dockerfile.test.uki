@@ -1,0 +1,35 @@
+FROM golang:1.26 AS builder
+WORKDIR /src
+COPY . .
+ENV CGO_ENABLED=0
+RUN go build --tags "nogit nounpack" -o /immucore .
+
+# Branch, tag or commit sha of kairos-agent to build into the image
+ARG AGENT_REF=main
+
+FROM golang:1.26 AS agent-builder
+ARG AGENT_REF
+ADD https://github.com/kairos-io/kairos-agent.git#${AGENT_REF} /src
+WORKDIR /src
+ENV CGO_ENABLED=0
+RUN go build -o /kairos-agent .
+
+FROM quay.io/kairos/kairos-init:v0.16.1 AS kairos-init
+
+# Trusted boot changes the base: raw hadron-trusted (systemd-boot flavored,
+# no grub/dracut), NOT the published kairos-ified quay.io/kairos/hadron image
+# the grub test Dockerfile starts from. Because the base is raw, kairos-init
+# runs BOTH stages here (install + init), each with -t true so the image is
+# set up for trusted boot (systemd-boot, no initramfs generation — auroraboot
+# build-uki packs the whole rootfs into the UKI later).
+FROM ghcr.io/kairos-io/hadron-trusted:main
+RUN --mount=type=bind,from=kairos-init,src=/kairos-init,dst=/kairos-init \
+    /kairos-init -l debug -s install -t true --version "v0.0.0-test"
+# Local immucore lands after install (which ships the framework immucore)
+# and before init, mirroring the grub test image.
+COPY --from=builder /immucore /usr/bin/immucore
+RUN --mount=type=bind,from=kairos-init,src=/kairos-init,dst=/kairos-init \
+    /kairos-init -l debug -s init -t true --version "v0.0.0-test"
+# Agent from AGENT_REF so its kairos-sdk has in-RAM BootState detection; must
+# land after kairos-init so the framework-shipped agent doesn't overwrite it.
+COPY --from=agent-builder /kairos-agent /usr/bin/kairos-agent

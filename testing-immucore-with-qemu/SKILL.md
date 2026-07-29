@@ -57,6 +57,51 @@ CHECK_CMD="immucore version; kairos-agent version" ...   # plus login knobs
 
 and compare against `git describe` / the agent ref you passed.
 
+**1b. Trusted boot (UKI) test ISO** — for testing immucore's UKI paths
+(`rd.immucore.uki`, in-RAM trusted boot, TPM-encrypted partitions):
+
+```bash
+$SKILL/scripts/build_test_uki_iso.sh
+EXTRA_CMDLINE="kairos.ram kairos.ram.create_partitions" $SKILL/scripts/build_test_uki_iso.sh
+```
+
+The pipeline differs from the grub ISO in three places:
+
+1. **Base image changes**: `scripts/Dockerfile.test.uki` starts from the raw
+   `ghcr.io/kairos-io/hadron-trusted:main` (systemd-boot flavored hadron) —
+   NOT the published kairos-ified `quay.io/kairos/hadron:*` image the grub
+   Dockerfile uses. There is no published trusted hadron+kairos image, so the
+   full kairos-init pipeline runs in the Dockerfile.
+2. **kairos-init needs the trusted flag**: both stages run with `-t true`
+   (`kairos-init -s install -t true` then `-s init -t true`). That switches
+   the bootloader setup to systemd-boot and skips dracut initramfs generation
+   — under trusted boot the whole rootfs becomes the UKI's initramfs, so the
+   locally-built immucore is picked up straight from `/usr/bin/immucore`.
+3. **auroraboot uses `build-uki` instead of `build-iso`**, and needs signing
+   keys: `--public-keys` (PK/KEK/db auth files for firmware auto-enrollment),
+   `--sb-key`/`--sb-cert` (db keypair signing the EFI binaries) and
+   `--tpm-pcr-private-key` (signs the PCR policy; this is what lets
+   `systemd-cryptenroll`-encrypted partitions unlock via TPM at boot).
+   `--sdboot-in-source` makes it take systemd-boot from the hadron rootfs
+   instead of the bundled one. The script generates a throwaway INSECURE key
+   set via `auroraboot genkey` into `build/uki-keys/` on first run; point
+   `KEYS_DIR` at real keys to override.
+
+Knobs: `IMMUCORE_DIR`, `AGENT_REF`, `KEYS_DIR`, `EXTRA_CMDLINE`,
+`AURORABOOT_IMAGE`, `OUTPUT_DIR`, `ISO_NAME` — same conventions as
+`build_test_iso.sh`.
+
+**The UKI cmdline is measured and signed**: `EXTRA_CMDLINE` at build time is
+the ONLY way to get tokens like `kairos.ram.*` onto the cmdline. Editing at
+boot is not possible (that is the point of trusted boot), so build one ISO
+per cmdline scenario.
+
+`boot_and_capture.sh` does NOT support these ISOs yet: it edits grub.cfg
+(UKI ISOs have none) and boots without secure-boot-capable OVMF vars.
+Booting a UKI ISO needs OVMF `secboot` firmware with the generated keys
+enrolled (or setup mode + the ISO's auto-enrollment). Harness support is
+pending.
+
 **2. Boot it with your scenario** (~2 min per boot):
 
 ```bash

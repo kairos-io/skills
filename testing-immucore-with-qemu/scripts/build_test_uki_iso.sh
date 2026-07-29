@@ -34,7 +34,8 @@ VERSION="$(git -C "${ROOT}" describe --always --dirty 2>/dev/null || echo latest
 : "${AURORABOOT_IMAGE:=quay.io/kairos/auroraboot:v0.25.0}"
 : "${AGENT_REF:=main}"
 : "${KEYS_DIR:=${OUTPUT_DIR}/uki-keys}"
-# Extra tokens for the signed UKI cmdline, e.g.
+# Extra tokens appended to the DEFAULT entry's signed UKI cmdline
+# (auroraboot --extend-cmdline), e.g.
 #   EXTRA_CMDLINE="kairos.ram kairos.ram.create_partitions"
 : "${EXTRA_CMDLINE:=}"
 
@@ -61,9 +62,11 @@ docker build \
 echo ">>> Cleaning stale artifacts in ${OUTPUT_DIR}"
 rm -f "${OUTPUT_DIR:?}/${ISO_NAME}.iso" "${OUTPUT_DIR:?}/${ISO_NAME}.iso.sha256"
 
+# --extend-cmdline modifies the default entry; --extra-cmdline would instead
+# create additional side entries and leave the default one untouched.
 EXTRA_ARGS=()
 if [ -n "${EXTRA_CMDLINE}" ]; then
-  EXTRA_ARGS+=(--extra-cmdline "${EXTRA_CMDLINE}")
+  EXTRA_ARGS+=(--extend-cmdline "${EXTRA_CMDLINE}")
 fi
 
 echo ">>> Building UKI ISO via ${AURORABOOT_IMAGE} from ${IMAGE_TAG}"

@@ -92,15 +92,37 @@ Knobs: `IMMUCORE_DIR`, `AGENT_REF`, `KEYS_DIR`, `EXTRA_CMDLINE`,
 `build_test_iso.sh`.
 
 **The UKI cmdline is measured and signed**: `EXTRA_CMDLINE` at build time is
-the ONLY way to get tokens like `kairos.ram.*` onto the cmdline. Editing at
-boot is not possible (that is the point of trusted boot), so build one ISO
-per cmdline scenario.
+the ONLY way to get tokens onto the cmdline (it extends the default boot
+entry via auroraboot `--extend-cmdline`). Editing at boot is not possible
+(that is the point of trusted boot), so build one ISO per cmdline scenario.
+Tokens you almost always want baked in for testing:
 
-`boot_and_capture.sh` does NOT support these ISOs yet: it edits grub.cfg
-(UKI ISOs have none) and boots without secure-boot-capable OVMF vars.
-Booting a UKI ISO needs OVMF `secboot` firmware with the generated keys
-enrolled (or setup mode + the ISO's auto-enrollment). Harness support is
-pending.
+- `rd.immucore.debug console=ttyS0` — debug logs, and immucore/systemd
+  output on the serial console the harness captures (`console=` last wins;
+  without it immucore's output goes to the VGA console only)
+- `kairos.ram kairos.ram.create_partitions` — the in-RAM workflow
+- `kairos.pull_datasources` — REQUIRED for `USERDATA` to work on in-RAM UKI
+  boots: the `uki_boot_mode` sentinel makes the stock datasource
+  cloud-config skip pulling providers (installed UKI systems carry config in
+  OEM), and this token re-enables it
+
+`boot_and_capture.sh` boots these ISOs natively: UKI mode is auto-detected
+from `-uki` in the ISO name (override with `UKI=1`/`UKI=0`) and switches to
+secureboot firmware (`OVMF_CODE.secboot.4m.fd`, q35 + SMM) plus a `swtpm`
+TPM 2.0 socket — needed for the TPM PCR encryption/unlock paths. Fresh
+setup-mode OVMF vars are used each run; the ISO auto-enrolls its keys on
+first boot (systemd-boot `secure-boot-enroll if-safe`) and resets.
+`CMDLINE` is rejected in UKI mode (signed cmdline) — the error points you at
+`EXTRA_CMDLINE`. Firmware paths default to Arch's edk2-ovmf; override with
+`OVMF_CODE`/`OVMF_VARS`. `swtpm` must be installed.
+
+**Reboot scenarios (TPM state must survive)**: LUKS keyslots are sealed to
+the specific TPM instance's SRK, so booting a disk encrypted on an earlier
+run needs the same swtpm state. When you pass `DISK=`, the harness
+automatically persists TPM state next to it (`<disk>.tpmstate`); `TPMSTATE=`
+overrides the location. Without `DISK` both disk and TPM are ephemeral.
+Second-boot expectations: `ensure-partitions is a no-op` in immucore.log,
+partitions unlock via TPM, `/usr/local` data from the previous boot intact.
 
 **2. Boot it with your scenario** (~2 min per boot):
 

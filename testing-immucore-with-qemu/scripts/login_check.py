@@ -96,14 +96,31 @@ if not user:
     print(">>> boot reached login prompt (no LOGIN_USER set, not logging in)")
     sys.exit(0)
 
-time.sleep(1)
-send(user)
-if not wait_for([b"Password:"], 30, "password prompt"):
-    sys.exit(1)
-send(password)
-time.sleep(2)
-send("echo LOGIN_OK_$(id -un)")
-if not wait_for([("LOGIN_OK_" + user).encode()], 30, "shell as " + user):
+# The login user usually comes from cloud-config, which may still be applying
+# when the getty first appears — and the getty itself can be restarted under
+# us by the serial-login cloud-config stage, eating whatever we typed. Every
+# failure mode (no Password prompt, wrong creds, restarted getty) is retried
+# against a freshly nudged prompt (LOGIN_ATTEMPTS, default 5).
+attempts = int(os.environ.get("LOGIN_ATTEMPTS", "5"))
+logged_in = False
+for attempt in range(attempts):
+    if attempt:
+        print(f"!!! login attempt {attempt}/{attempts} failed; retrying")
+        time.sleep(10)
+        send("")  # nudge a fresh prompt out of agetty
+        if not wait_for([b"login:"], 60, "fresh login prompt"):
+            continue
+    time.sleep(1)
+    send(user)
+    if not wait_for([b"Password:"], 30, "password prompt"):
+        continue
+    send(password)
+    time.sleep(2)
+    send("echo LOGIN_OK_$(id -un)")
+    if wait_for([("LOGIN_OK_" + user).encode()], 20, "shell as " + user):
+        logged_in = True
+        break
+if not logged_in:
     sys.exit(1)
 settle()
 

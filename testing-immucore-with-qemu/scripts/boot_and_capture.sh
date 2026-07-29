@@ -21,6 +21,16 @@
 #                into LOGDIR/check.log)
 #   LOGDIR       output dir (default: <repo>/build/logs)
 #   TIMEOUT      seconds to wait for login prompt / failure screen (default 300)
+#   UKI          1 = trusted-boot mode: secureboot OVMF + swtpm TPM2, no grub
+#                cmdline injection (auto-detected when the ISO name contains
+#                "-uki"). CMDLINE is rejected here — the UKI cmdline is signed
+#                at build time, bake tokens with build_test_uki_iso.sh's
+#                EXTRA_CMDLINE instead
+#   OVMF_CODE / OVMF_VARS
+#                firmware override; defaults are the Arch edk2-ovmf paths,
+#                secboot CODE in UKI mode. VARS must be a fresh (setup mode)
+#                template — the ISO auto-enrolls its keys on first boot via
+#                systemd-boot's "secure-boot-enroll if-safe"
 #
 # Exit codes: 0 boot ok (and login ok if requested), 2 failure screen seen,
 # 1 anything else.
@@ -30,6 +40,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # build/ produced by build_test_iso.sh). Defaults to the current directory.
 : "${IMMUCORE_DIR:=$PWD}"
 
+CMDLINE_SET="${CMDLINE+1}"
+DISK_SET="${DISK+1}"
 : "${CMDLINE:=rd.immucore.debug}"
 : "${LOGDIR:=${IMMUCORE_DIR}/build/logs}"
 : "${TIMEOUT:=300}"
@@ -41,22 +53,38 @@ if [[ -z "${ISO:-}" ]]; then
 fi
 [[ -f "${ISO:-}" ]] || { echo "!!! no test ISO found; run build_test_iso.sh first or set ISO="; exit 1; }
 
+# Trusted-boot mode: explicit UKI=1/0 wins, otherwise sniff the ISO name.
+if [[ -z "${UKI:-}" ]]; then
+  case "${ISO##*/}" in *-uki*) UKI=1 ;; *) UKI=0 ;; esac
+fi
+
 WORK="$(mktemp -d)"
 # the || true matters: a failing command in an EXIT trap under set -e
 # overwrites the script's exit code
-trap 'kill -9 "${qpid:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+trap 'kill -9 "${qpid:-}" "${tpmpid:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 mkdir -p "$LOGDIR"
 
-# --- inject cmdline into the first grub entry -------------------------------
 iso="$WORK/test.iso"
 cp "$ISO" "$iso"
-xorriso -indev "$iso" -osirrox on -extract /boot/grub2/grub.cfg "$WORK/grub.cfg" >/dev/null 2>&1
-sed -e 's/set timeout=10/set timeout=1/' \
-    -e "0,/rd.cos.disable/{s|rd.cos.disable |${CMDLINE} |}" \
-    -e '0,/install-mode /s|install-mode ||' \
-    -e '0,/cdroot /s|cdroot ||' \
-    "$WORK/grub.cfg" > "$WORK/grub.cfg.new"
-xorriso -boot_image any keep -dev "$iso" -map "$WORK/grub.cfg.new" /boot/grub2/grub.cfg -commit >/dev/null 2>&1
+
+if [[ "$UKI" == "1" ]]; then
+  # The UKI cmdline is measured and signed — nothing to inject here. Tokens
+  # must be baked at build time (build_test_uki_iso.sh EXTRA_CMDLINE).
+  if [[ -n "$CMDLINE_SET" ]]; then
+    echo "!!! CMDLINE cannot be changed on a UKI ISO (signed cmdline)." >&2
+    echo "!!! Rebuild with: EXTRA_CMDLINE=\"${CMDLINE}\" build_test_uki_iso.sh" >&2
+    exit 1
+  fi
+else
+  # --- inject cmdline into the first grub entry -----------------------------
+  xorriso -indev "$iso" -osirrox on -extract /boot/grub2/grub.cfg "$WORK/grub.cfg" >/dev/null 2>&1
+  sed -e 's/set timeout=10/set timeout=1/' \
+      -e "0,/rd.cos.disable/{s|rd.cos.disable |${CMDLINE} |}" \
+      -e '0,/install-mode /s|install-mode ||' \
+      -e '0,/cdroot /s|cdroot ||' \
+      "$WORK/grub.cfg" > "$WORK/grub.cfg.new"
+  xorriso -boot_image any keep -dev "$iso" -map "$WORK/grub.cfg.new" /boot/grub2/grub.cfg -commit >/dev/null 2>&1
+fi
 
 # --- optional cidata ISO from USERDATA ---------------------------------------
 CIDATA_ARGS=()
@@ -75,13 +103,51 @@ if [[ -z "${DISK:-}" ]]; then
   qemu-img create -f qcow2 "$DISK" 2G >/dev/null
 fi
 
-vars="$WORK/ovmf_vars.fd"
-cp -f /usr/share/OVMF/x64/OVMF_VARS.4m.fd "$vars"
+# --- firmware + trusted-boot extras -------------------------------------------
+: "${OVMF_VARS:=/usr/share/OVMF/x64/OVMF_VARS.4m.fd}"
+UKI_ARGS=()
+if [[ "$UKI" == "1" ]]; then
+  # Secureboot-capable firmware needs q35 + SMM, and the flash must be marked
+  # secure so the variable store is only writable from SMM.
+  : "${OVMF_CODE:=/usr/share/OVMF/x64/OVMF_CODE.secboot.4m.fd}"
+  UKI_ARGS+=(-machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on)
 
-echo ">>> booting ${ISO##*/} with cmdline: ${CMDLINE}"
+  # TPM 2.0 emulator — the in-RAM trusted-boot workflow encrypts/unlocks
+  # partitions against it, and the UKI measures itself into its PCRs.
+  # LUKS keyslots are sealed to THIS TPM instance's SRK: reboot scenarios
+  # (unlock partitions encrypted on an earlier boot) need the TPM state to
+  # survive alongside the disk, so a user-provided DISK pairs with a
+  # persistent <disk>.tpmstate dir by default. TPMSTATE overrides; unset
+  # DISK keeps both ephemeral.
+  command -v swtpm >/dev/null || { echo "!!! swtpm not installed (needed for UKI mode)"; exit 1; }
+  if [[ -z "${TPMSTATE:-}" ]]; then
+    if [[ -n "$DISK_SET" ]]; then TPMSTATE="${DISK}.tpmstate"; else TPMSTATE="$WORK/tpm"; fi
+  fi
+  mkdir -p "$TPMSTATE"
+  swtpm socket --tpm2 --tpmstate "dir=$TPMSTATE" \
+    --ctrl "type=unixio,path=$WORK/tpm.sock" --terminate &
+  tpmpid=$!
+  UKI_ARGS+=(-chardev "socket,id=chrtpm,path=$WORK/tpm.sock"
+             -tpmdev emulator,id=tpm0,chardev=chrtpm
+             -device tpm-tis,tpmdev=tpm0)
+else
+  : "${OVMF_CODE:=/usr/share/OVMF/x64/OVMF_CODE.4m.fd}"
+fi
+
+# Fresh copy: the ISO auto-enrolls its secureboot keys into setup-mode vars
+# on first boot (systemd-boot "secure-boot-enroll if-safe"), then resets.
+vars="$WORK/ovmf_vars.fd"
+cp -f "$OVMF_VARS" "$vars"
+
+if [[ "$UKI" == "1" ]]; then
+  echo ">>> booting ${ISO##*/} (UKI trusted boot: secureboot OVMF + swtpm; signed cmdline)"
+else
+  echo ">>> booting ${ISO##*/} with cmdline: ${CMDLINE}"
+fi
 qemu-system-x86_64 \
   -enable-kvm -cpu host -m 2G -smp 2 \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/x64/OVMF_CODE.4m.fd \
+  "${UKI_ARGS[@]}" \
+  -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
   -drive "if=pflash,format=raw,file=${vars}" \
   -drive "file=${iso},format=raw,if=ide,media=cdrom,readonly=on" \
   "${CIDATA_ARGS[@]}" \

@@ -13,9 +13,13 @@ QEMU/KVM, drive the interactive installer with no human at the keyboard (QEMU
 The installer runs on the VGA console (`/dev/tty1`), so the QEMU framebuffer is
 the source of truth — no terminal-emulator rendering needed.
 
-This is a battle-tested runbook (validated end-to-end). Reusable helpers live in
-`scripts/` beside this file: `qmp.py`, `drive.py`, `record-loop.sh`,
-`mkvideo.sh`, `fake-agent`, `Dockerfile.installer`.
+This is a battle-tested runbook (validated end-to-end). Installer-specific
+helpers live in `scripts/` beside this file: `fake-agent`, `Dockerfile.installer`.
+
+**REQUIRED BACKGROUND:** the generic QEMU mechanics (launch flags, `drive.py` /
+`qmp.py` usage, screen recording, networking/gotchas) live in the
+**driving-qemu-vms** skill next to this one; its scripts are at
+`../driving-qemu-vms/scripts/`.
 
 ## Prerequisites
 
@@ -87,37 +91,22 @@ The live ISO with `install-mode` on its cmdline **drops to a shell on tty1**; th
 serial console gets a **root autologin shell** (handy, but `-serial file:` is
 output-only). Launch the installer yourself (next step).
 
-### 7. Drive the installer headlessly (see `scripts/drive.py`)
+### 7. Drive the installer headlessly
+Use `drive.py` from the driving-qemu-vms skill (`QEMU=../driving-qemu-vms/scripts`):
 ```bash
-# NOTE: zsh won't word-split a "python3 scripts/drive.py /tmp/ke.sock" var; call it directly
-python3 scripts/drive.py /tmp/ke.sock type 'kairos-agent interactive-install'   # dispatch path
-python3 scripts/drive.py /tmp/ke.sock key ret
-python3 scripts/drive.py /tmp/ke.sock shot /tmp/build/frames/01.ppm             # then convert to png
-python3 scripts/drive.py /tmp/ke.sock key ctrl-d                                # debug bundle hotkey
-python3 scripts/drive.py /tmp/ke.sock key 'down down ret'                       # menus
+# NOTE: zsh won't word-split a "python3 $QEMU/drive.py /tmp/ke.sock" var; call it directly
+python3 ../driving-qemu-vms/scripts/drive.py /tmp/ke.sock type 'kairos-agent interactive-install'   # dispatch path
+python3 ../driving-qemu-vms/scripts/drive.py /tmp/ke.sock key ret
+python3 ../driving-qemu-vms/scripts/drive.py /tmp/ke.sock shot /tmp/build/frames/01.ppm             # then convert to png
+python3 ../driving-qemu-vms/scripts/drive.py /tmp/ke.sock key ctrl-d                                # debug bundle hotkey
+python3 ../driving-qemu-vms/scripts/drive.py /tmp/ke.sock key 'down down ret'                       # menus
 ```
-`drive.py SOCK type "..."` types text, `key name [name...]` sends keys
-(`ret ctrl-d down up esc q spc`), `shot path.ppm` screendumps. To run YOUR binary
-directly (bypassing dispatch): `type /system/installer/installer`.
+To run YOUR binary directly (bypassing dispatch): `type /system/installer/installer`.
 
-### 8. Record a video — capture frames, then assemble
-**For a full boot-to-end recording, start the capture loop right after launching
-QEMU** so it includes GRUB + boot + console:
-```bash
-./scripts/record-loop.sh /tmp/ke.sock /tmp/build/rec 1 &   # screendump every 1s
-# ... drive the installer ...
-touch /tmp/build/rec/.stop
-ffmpeg -y -framerate 6 -i /tmp/build/rec/%06d.png -c:v libx264 -pix_fmt yuv420p full.mp4
-```
-For a curated clip from specific screenshots, give `scripts/mkvideo.sh`
-(png,seconds) pairs: `./scripts/mkvideo.sh out 25  disk.png 3  ready.png 4 ...`
-→ `out.mp4` + `out.gif`.
-
-**Do NOT build videos with ffmpeg's concat demuxer + per-image `duration`** — it
-does not apply image durations reliably (one frame dominates, others vanish).
-`mkvideo.sh` emits an explicit numbered frame sequence (`duration×fps` copies
-each) and encodes at constant fps; this is the only method that works here.
-**Always extract frames from the finished mp4 and eyeball them.**
+### 8. Record a video
+See the driving-qemu-vms skill (record-loop.sh + mkvideo.sh, and why the ffmpeg
+concat demuxer must NOT be used). Installer-specific note: **start the capture
+loop right after launching QEMU** so the recording includes GRUB + boot + console.
 
 ### 9. Trigger an install failure (see `scripts/fake-agent`)
 To exercise the auto-open-on-failure path and see what the debug bundle captures,
@@ -126,8 +115,8 @@ delegates `logs` to the real agent (so the bundle still gathers journald). The
 shim is baked into the image (see `scripts/Dockerfile.installer`) at
 `/opt/fake-agent`:
 ```bash
-python3 scripts/drive.py /tmp/ke.sock type 'export KAIROS_AGENT_BIN=/opt/fake-agent ; kairos-agent interactive-install'
-python3 scripts/drive.py /tmp/ke.sock key ret
+python3 ../driving-qemu-vms/scripts/drive.py /tmp/ke.sock type 'export KAIROS_AGENT_BIN=/opt/fake-agent ; kairos-agent interactive-install'
+python3 ../driving-qemu-vms/scripts/drive.py /tmp/ke.sock key ret
 # navigate to start install -> it fails -> debug bundle page auto-opens
 ```
 
@@ -135,27 +124,25 @@ python3 scripts/drive.py /tmp/ke.sock key ret
 The bundle's HTTP server binds inside the guest on an ephemeral port. Read the
 port+token from the screen, then forward it and curl from the host:
 ```bash
-python3 scripts/qmp.py /tmp/ke.sock "hostfwd_add tcp::35791-:<GUEST_PORT>"   # use a FREE host port
+python3 ../driving-qemu-vms/scripts/qmp.py /tmp/ke.sock "hostfwd_add tcp::35791-:<GUEST_PORT>"   # use a FREE host port
 curl -s -o /tmp/b.tgz -w '%{http_code}\n' http://127.0.0.1:35791/<TOKEN>/<FILE>
 ```
 
 ## Gotchas (the hard-won lessons)
 
+Generic QEMU gotchas (AF_UNIX path length, backgrounding, video assembly,
+hostfwd/networking, USB removable, `drive.py` CHARMAP) are in the
+**driving-qemu-vms** skill. Installer-specific ones:
+
 | Symptom | Cause / Fix |
 |---|---|
-| Video shows wrong screen / one frame for the whole clip | ffmpeg concat-demuxer image `duration` is unreliable. Use `scripts/mkvideo.sh` (numbered sequence). **Always extract frames from the finished mp4 and eyeball them.** |
-| `OSError: AF_UNIX path too long` on the QMP socket | Unix socket paths must be < ~108 chars. Put the socket in `/tmp` (e.g. `/tmp/ke.sock`), not a deep scratch dir. Disk image / ISO paths can be long. |
-| Backgrounded QEMU/auroraboot dies when the command returns | A foreground `nohup … &` inside a tool call gets torn down. Use the runtime's real background mechanism (`run_in_background`). |
 | Your installer doesn't run; a look-alike does | Prebuilt image's kairos-agent has no dispatcher. Overlay kairos-agent from master (step 3). Confirm your binary by a change only it has (e.g. a help-line string). |
 | `GHW_CHROOT` ignored, real host disks show up | `block.New(WithDisableTools(), WithNullAlerter())` (old-style opts) makes ghw skip the `GHW_CHROOT` env default. You can't fake disks for the real binary via env — attach real QEMU devices instead. |
-| USB drive not listed as removable (`lsblk RM=0`) | QEMU `usb-storage` defaults `removable=off`. Add `-device usb-storage,…,removable=on` so `/sys/block/sdX/removable==1` (what ghw checks). It needs a partition + filesystem **mounted** to appear in a removable-mount scan. |
-| Can't reach the guest's HTTP server from the host | Guest user-net IP is `10.0.2.15`; the host is `10.0.2.2` from the guest. From the host, `hostfwd_add tcp::<freeport>-:<guestport>` (a busy host port makes `hostfwd_add` fail). |
-| Need to push a file into the guest | Serve it on the host (`python3 -m http.server`) and `curl http://10.0.2.2:PORT/…` from the guest (curl is present; wget is not on minimal Hadron). |
-| `drive.py type` errors `unmapped char` | Add the char to `CHARMAP` in `scripts/drive.py`. Avoid host-side `$(...)`/globs leaking into the typed string — single-quote the argument. |
+| Guest tooling is minimal | curl is present; wget is not on minimal Hadron. |
 
 ## Quick reference
 
 - Dispatcher slots: `$KAIROS_INSTALLER` → `/system/installer/installer` → `/system/installer/kairos-installer`.
 - Installer runs on `/dev/tty1` when cmdline has `interactive-install`/`install-mode-interactive`; `install-mode` runs the non-interactive `kairos-agent install`.
 - Debug bundle path: `/run/kairos/kairos-logs-<ts>.tar.gz`; logs globbed from `/var/log/kairos/*.log`.
-- Helpers in `scripts/`: `qmp.py` (one HMP cmd), `drive.py` (type/key/shot), `record-loop.sh` (boot-to-end capture), `mkvideo.sh` (curated clip), `fake-agent` (failure shim), `Dockerfile.installer` (derivative image).
+- Helpers in `scripts/`: `fake-agent` (failure shim), `Dockerfile.installer` (derivative image). Generic drivers (`qmp.py`, `drive.py`, `record-loop.sh`, `mkvideo.sh`) in `../driving-qemu-vms/scripts/`.

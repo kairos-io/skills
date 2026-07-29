@@ -18,18 +18,22 @@ skill next to this one.
 ## Prerequisites
 
 - A checkout of [kairos-io/immucore](https://github.com/kairos-io/immucore) —
-  the harness ships with the code under `tests/` (all paths below are relative
-  to that checkout).
+  the version under test. All scripts ship in `scripts/` beside this skill and
+  find the checkout via `IMMUCORE_DIR` (default: the current directory, so
+  running them from inside the checkout needs no setup).
 - `docker`, `qemu-system-x86_64` + `/dev/kvm`, `xorriso`, OVMF firmware,
   ImageMagick (`magick`, for failure-screen PNGs), `python3`.
 
 ## Workflow
 
+`SKILL=<path to this skill's directory>`; run from inside the immucore
+checkout, or set `IMMUCORE_DIR=/path/to/immucore`.
+
 **1. Build the test ISO** (once per code change, ~5 min):
 
 ```bash
-./tests/build_test_iso.sh                 # local immucore + kairos-agent@main
-AGENT_REF=<branch|tag|sha> ./tests/build_test_iso.sh   # pin the agent
+$SKILL/scripts/build_test_iso.sh                 # local immucore + kairos-agent@main
+AGENT_REF=<branch|tag|sha> $SKILL/scripts/build_test_iso.sh   # pin the agent
 ```
 
 Picking the versions under test:
@@ -39,7 +43,7 @@ Picking the versions under test:
   had uncommitted changes.
 - **kairos-agent** — any git ref of kairos-io/kairos-agent via `AGENT_REF`
   (default `main`). For a PR, use its head sha or branch name. Forks need a
-  `tests/Dockerfile.test` edit (the repo URL is hardcoded).
+  `scripts/Dockerfile.test` edit (the repo URL is hardcoded).
 - **kairos-sdk** — no knob. For immucore: `go mod edit -replace` or bump
   `go.mod` locally, then rebuild. For the agent: push a branch of
   kairos-agent with the sdk bump and point `AGENT_REF` at it.
@@ -57,13 +61,13 @@ and compare against `git describe` / the agent ref you passed.
 
 ```bash
 CMDLINE="kairos.ram.create_partitions rd.immucore.debug" \
-USERDATA=tests/qemu/userdata-login.yaml \
+USERDATA=$SKILL/scripts/userdata-login.yaml \
 LOGIN_USER=kairos LOGIN_PASS=kairos \
 CHECK_CMD="kairos-agent state" \
-./tests/qemu/boot_and_capture.sh
+$SKILL/scripts/boot_and_capture.sh
 ```
 
-`tests/qemu/userdata-login.yaml` is a ready-made cloud-config creating the
+`scripts/userdata-login.yaml` is a ready-made cloud-config creating the
 kairos/kairos user — use it verbatim or as the base for scenario userdata.
 
 All knobs are documented in the script header. Key ones:
@@ -75,8 +79,9 @@ All knobs are documented in the script header. Key ones:
 | `LOGIN_USER`/`LOGIN_PASS` | log in on serial getty and dump logs from inside |
 | `CHECK_CMD` | root shell command, output lands in `check.log` |
 | `DISK` | pre-made qcow2 (e.g. foreign GPT for wipe-guard scenarios); default fresh empty 2G |
-| `ISO` | explicit ISO; default newest `build/immucore-test-*.iso` |
-| `LOGDIR` | evidence output dir; default `build/logs` — set it per scenario to keep runs apart |
+| `IMMUCORE_DIR` | immucore checkout for ISO/log defaults; default current dir |
+| `ISO` | explicit ISO; default newest `$IMMUCORE_DIR/build/immucore-test-*.iso` |
+| `LOGDIR` | evidence output dir; default `$IMMUCORE_DIR/build/logs` — set it per scenario to keep runs apart |
 
 Exit codes: `0` boot (+login) ok, `2` red failure screen seen (screendump saved), `1` timeout/error.
 
